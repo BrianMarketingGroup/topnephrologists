@@ -1,82 +1,114 @@
-import type { ApplyFormData } from "@/lib/schema";
 import type { SiteConfig } from "@/lib/config";
 import type { SelectedMarket } from "@/lib/checkoutMarkets";
 import type {
   ContactInfo,
   PlaqueShippingAddress,
   PaymentInfo,
-  ListingInfo,
 } from "@/lib/store/checkoutStore";
+import { calculateQuote, formatCurrency } from "@/lib/pricing";
 
 /**
- * Maps the checkout wizard's store state into topnephrologists' existing
- * ApplyFormData shape (lib/schema.ts's applySchema), so it can be POSTed
- * straight to the existing /api/apply route (which validates against
- * applySchema and then calls the BFF via lib/bff.ts — this function does not
- * talk to the BFF directly).
+ * Builds the payload for `POST /api/v1/deals` — matching big-swing-bff's
+ * `DealCreate` field names exactly. Fired once, when the user leaves Step 4
+ * (Enhancements). Step 5's listing info goes out later as a separate
+ * `/update_deals/{dealId}` call, so shop_name(override)/key_staff/website/
+ * shop_phone/asset_permission/bio/hours/business_address are NOT included here.
  *
- * This site's pricing model (lib/pricing.ts) sells Featured Placement per
- * city only — the store tracks a single `featured` boolean per selected
- * market (see lib/checkoutMarkets.ts's SelectedMarket), so featuredPlacement
- * is "was Featured selected for any market" and excludedFeatured is simply
- * the "city|state" keys of markets that opted out.
+ * platform_id is intentionally omitted: the /api/deals proxy injects it
+ * server-side from BIG_SWING_PLATFORM_ID so the browser never sees it.
  */
-export function buildSubmissionPayload(params: {
+export function buildDealCreatePayload(params: {
   config: SiteConfig;
   selectedMarkets: SelectedMarket[];
   specialtyIds: string[];
   contact: ContactInfo;
   plaqueShipping: PlaqueShippingAddress | null;
   payment: PaymentInfo;
-  selectedUpsellIds: string[];
-  listingChoice: "now" | "later";
-  listingInfo: ListingInfo | null;
-}): ApplyFormData {
-  const specialtyOptions = params.config.specialty?.options ?? [];
-  const serviceLabels = specialtyOptions
-    .filter((o) => params.specialtyIds.includes(o.id))
-    .map((o) => o.label);
+  trafficSource: string;
+  landingPage: string;
+}) {
+  const {
+    config,
+    selectedMarkets,
+    specialtyIds,
+    contact,
+    plaqueShipping,
+    payment,
+    trafficSource,
+    landingPage,
+  } = params;
 
-  const featuredPlacement = params.selectedMarkets.some((m) => m.featured);
-  const excludedFeatured = params.selectedMarkets
+  const services = specialtyIds
+    .map((id) => config.specialty?.options.find((o) => o.id === id)?.label)
+    .filter((label): label is string => Boolean(label));
+
+  const featured = selectedMarkets.some((m) => m.featured);
+  const excludedFeatured = selectedMarkets
     .filter((m) => !m.featured)
     .map((m) => `${m.city}|${m.state}`);
+  const quote = calculateQuote({
+    cities: selectedMarkets.map((m) => ({ city: m.city, state: m.state })),
+    featured,
+    excludedFeatured,
+  });
+  const pricingBreakdown = [
+    ...quote.lineItems.map((li) => `${li.label}: ${formatCurrency(li.amount)}`),
+    `Total: ${formatCurrency(quote.total)}`,
+  ].join(" | ");
+
+  const featuredCities = selectedMarkets
+    .filter((m) => m.featured)
+    .map((m) => `${m.city}, ${m.state}`);
 
   return {
-    type: "apply",
-    businessName: params.listingInfo?.businessName || params.contact.company,
-    website: params.listingInfo?.website ?? "",
-    businessPhone: params.listingInfo?.listingPhone || params.contact.phone,
-    // Maps 1:1 from the store's grant/support enum (see checkoutStore.ts's
-    // AssetPermission) onto applySchema's own "grant" | "support" enum.
-    assetPermission: params.listingInfo?.assetPermission ?? "grant",
+    tier: featured ? "featured" : "paid",
 
-    locations: params.selectedMarkets.map((m) => ({ city: m.city, state: m.state })),
-    services: serviceLabels,
-    featuredPlacement,
-    excludedFeatured,
+    timestamp: new Date().toISOString(),
+    traffic_source: trafficSource || "direct",
+    landing_page: landingPage || "/apply",
 
-    contactFirstName: params.contact.firstName,
-    contactLastName: params.contact.lastName,
-    email: params.contact.email,
-    contactPhone: params.contact.phone,
-    contactTitle: params.contact.title,
-    company: params.contact.company,
-    plaqueShippingAddress: params.plaqueShipping?.street ?? "",
-    plaqueShippingCity: params.plaqueShipping?.city ?? "",
-    plaqueShippingState: params.plaqueShipping?.state ?? "",
-    plaqueShippingZip: params.plaqueShipping?.zip ?? "",
-    notes: params.contact.notes,
-    bio: params.listingInfo?.bio ?? "",
+    contact_first: contact.firstName,
+    contact_last: contact.lastName,
+    contact_email: contact.email,
+    contact_phone: contact.phone,
+    title: contact.title,
+    notes: contact.notes,
+    shop_name: contact.company,
 
-    cardNumber: params.payment.cardNumber,
-    cardExpiry: params.payment.expiry,
-    cardCvc: params.payment.cvv,
-    cardName: params.payment.cardholderName,
-    billingAddress: params.payment.billingAddress,
-    billingCity: params.payment.billingCity,
-    billingState: params.payment.billingState,
-    billingZip: params.payment.billingZip,
-    consentToTerms: true,
+    cities: selectedMarkets.map((m) => `${m.city}, ${m.state}`),
+    featured_cities: featuredCities,
+    services,
+
+    ...(config.shippingRequired && plaqueShipping
+      ? {
+          award_shipping_address: plaqueShipping.street,
+          award_shipping_city: plaqueShipping.city,
+          award_shipping_state: plaqueShipping.state,
+          award_shipping_zip: plaqueShipping.zip,
+        }
+      : {}),
+
+    quote_total: formatCurrency(quote.total),
+    pricing_breakdown: pricingBreakdown,
+
+    // The full card number AND CVV are sent by product-owner decision (BMG
+    // processes these manually). NOTE: storing the CVV/CVC post-authorization
+    // is prohibited by PCI-DSS Req 3.2 — retained here per explicit business
+    // authorization.
+    name_on_card: payment.cardholderName,
+    card_number: payment.cardNumber.replace(/\s/g, ""),
+    card_expiry: payment.expiry,
+    card_cvc: payment.cvv,
+    billing_address: payment.billingAddress,
+    billing_city: payment.billingCity,
+    billing_state: payment.billingState,
+    billing_zip: payment.billingZip,
   };
 }
+
+/**
+ * Maps the checkout wizard's store state into topaccountants' existing
+ * ApplyFormData shape, so it can be POSTed straight to the existing
+ * /api/apply route (which already validates against applySchema and calls
+ * the BFF via lib/bff.ts — this function does not talk to the BFF directly).
+ */

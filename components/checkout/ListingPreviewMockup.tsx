@@ -7,12 +7,14 @@ import type { SelectedMarket } from "@/lib/checkoutMarkets";
 export default function ListingPreviewMockup({
   businessName,
   bio,
+  people,
   market,
   logo,
   hasFeatured,
 }: {
   businessName: string;
   bio: string;
+  people?: string;
   market: SelectedMarket | null;
   logo?: UploadedFileMeta;
   hasFeatured?: boolean;
@@ -47,6 +49,7 @@ export default function ListingPreviewMockup({
               <MapPin size={12} /> {market.city}, {market.state}
             </p>
           )}
+          {people && <p className="text-xs text-muted mb-1 truncate">{people}</p>}
           <p className="text-sm text-dark line-clamp-2">
             {bio || "Your practice description will appear here once you add a bio below."}
           </p>

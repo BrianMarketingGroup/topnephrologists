@@ -10,17 +10,15 @@ export default function OrderSummarySidebar({ config }: { config: SiteConfig }) 
   const specialtyIds = useCheckoutStore((s) => s.specialtyIds);
   const removeMarket = useCheckoutStore((s) => s.removeMarket);
 
-  const selectedSpecialtyLabels = (config.specialty?.options ?? [])
+  const areaOptions = config.specialty?.options ?? [];
+  const selectedAreaLabels = areaOptions
     .filter((o) => specialtyIds.includes(o.id))
     .map((o) => o.label);
 
-  // Featured Placement is a single per-city toggle here (see
-  // lib/checkoutMarkets.ts's SelectedMarket.featured), so it maps directly
-  // onto calculateQuote()'s (featured, excludedFeatured) pair: featured if
-  // any market opted in, and every market that didn't is "excluded" — the
-  // same mapping lib/submission.ts uses to build the /api/apply payload.
   const featured = selectedMarkets.some((m) => m.featured);
-  const excludedFeatured = selectedMarkets.filter((m) => !m.featured).map((m) => `${m.city}|${m.state}`);
+  const excludedFeatured = selectedMarkets
+    .filter((m) => !m.featured)
+    .map((m) => `${m.city}|${m.state}`);
 
   const quote = calculateQuote({
     cities: selectedMarkets.map((m) => ({ city: m.city, state: m.state })),
@@ -36,7 +34,7 @@ export default function OrderSummarySidebar({ config }: { config: SiteConfig }) 
 
       <dl className="space-y-2 text-sm mb-4">
         <div>
-          <dt className="text-muted mb-1">City(ies)</dt>
+          <dt className="text-muted mb-1">Market(s)</dt>
           {selectedMarkets.length > 0 ? (
             <ul className="space-y-1">
               {selectedMarkets.map((m) => (
@@ -67,7 +65,7 @@ export default function OrderSummarySidebar({ config }: { config: SiteConfig }) 
           <div className="flex justify-between gap-4">
             <dt className="text-muted">{config.specialty.label}</dt>
             <dd className="text-right text-dark font-medium">
-              {selectedSpecialtyLabels.length > 0 ? selectedSpecialtyLabels.join(", ") : "—"}
+              {selectedAreaLabels.length > 0 ? selectedAreaLabels.join(", ") : "—"}
             </dd>
           </div>
         )}

@@ -78,6 +78,7 @@ export interface SiteConfig {
   shippingRequired: boolean;
 
   listingFields: {
+    peopleLabel: string;
     bioMaxChars: number;
     fileUploadTypes: Array<"logo" | "profilePhoto" | "bannerImage">;
   };
@@ -142,6 +143,7 @@ export const nephrologistsConfig: SiteConfig = {
   shippingRequired: true,
 
   listingFields: {
+    peopleLabel: "Physicians",
     bioMaxChars: 1500,
     fileUploadTypes: ["logo", "profilePhoto", "bannerImage"],
   },

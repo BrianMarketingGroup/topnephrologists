@@ -81,14 +81,15 @@ export interface UploadedFileMeta {
 
 export type UploadKind = "logo" | "profilePhoto" | "bannerImage";
 
-// Asset permission is a real two-way choice in the old ApplyForm.tsx (Step
-// 5's "Website Asset Permission" radio group — "grant" vs "support"), which
-// maps 1:1 onto lib/schema.ts's applySchema.assetPermission enum, so the
-// store keeps that enum directly rather than flattening it to a boolean.
+// Preserved from the original site — the ApplyForm collected a two-value
+// "Website Asset Permission" radio group ("grant" vs "support"), matching
+// lib/schema.ts's applySchema.assetPermission enum, so the store keeps that
+// enum directly rather than flattening it to a boolean.
 export type AssetPermission = "grant" | "support";
 
 export interface ListingInfo {
   businessName: string;
+  people: string;
   listingPhone: string;
   listingEmail: string;
   website: string;
@@ -102,6 +103,7 @@ export interface ListingInfo {
 function defaultListingInfo(): ListingInfo {
   return {
     businessName: "",
+    people: "",
     listingPhone: "",
     listingEmail: "",
     website: "",
@@ -133,15 +135,23 @@ interface CheckoutState {
 
   debugSubmissionPayload: unknown | null;
 
+  // Set once POST /api/deals succeeds (on leaving Step 4). Once non-null, the
+  // deal is saved for real — goBack/goToStep lock out steps 1-4, and Step 5
+  // becomes an update (/update_deals/{dealId}) rather than a create.
+  dealId: number | null;
+
+  // First-touch attribution (referrer + entry URL), captured once on wizard
+  // mount — see CheckoutWizard's captureAttribution() call.
+  trafficSource: string;
+  landingPage: string;
+
   goToStep: (step: WizardStep) => void;
   goNext: () => void;
   goBack: () => void;
+  captureAttribution: () => void;
 
   addMarket: (marketId: string) => void;
   removeMarket: (marketId: string) => void;
-  // Featured Placement is sold per city here (featuredScope: "city" — see
-  // lib/config.ts, matching this site's existing lib/pricing.ts model), so
-  // this is a single toggle per market, not a per-specialty/coverage-area set.
   toggleMarketFeatured: (marketId: string) => void;
   toggleSpecialty: (id: string) => void;
 
@@ -157,6 +167,7 @@ interface CheckoutState {
   setUploadedFile: (kind: UploadKind, meta: UploadedFileMeta | null) => void;
 
   setDebugSubmissionPayload: (payload: unknown) => void;
+  setDealId: (id: number | null) => void;
 
   reset: () => void;
 }
@@ -172,6 +183,9 @@ type PersistedCheckoutState = Pick<
   | "selectedUpsellIds"
   | "listingChoice"
   | "listingInfo"
+  | "dealId"
+  | "trafficSource"
+  | "landingPage"
 >;
 
 const initialContact: ContactInfo = {
@@ -217,8 +231,14 @@ export const useCheckoutStore = create<CheckoutState>()(
 
       debugSubmissionPayload: null,
 
+      dealId: null,
+      trafficSource: "",
+      landingPage: "",
+
       goToStep: (step) => {
-        if (step <= get().furthestStep) set({ step });
+        const { furthestStep, dealId } = get();
+        if (dealId !== null && step < 5) return; // deal saved — no returning to 1-4
+        if (step <= furthestStep) set({ step });
       },
       goNext: () =>
         set((state) => {
@@ -226,7 +246,20 @@ export const useCheckoutStore = create<CheckoutState>()(
           return { step: next, furthestStep: Math.max(state.furthestStep, next) as WizardStep };
         }),
       goBack: () =>
-        set((state) => ({ step: Math.max(state.step - 1, 1) as WizardStep })),
+        set((state) => {
+          if (state.dealId !== null) return state; // deal saved — no returning to 1-4
+          return { step: Math.max(state.step - 1, 1) as WizardStep };
+        }),
+      captureAttribution: () =>
+        set((state) => {
+          // First-touch only — never overwrite once set (e.g. on remount).
+          if (state.trafficSource || state.landingPage) return state;
+          if (typeof window === "undefined") return state;
+          return {
+            trafficSource: document.referrer || "direct",
+            landingPage: window.location.href,
+          };
+        }),
 
       addMarket: (marketId) =>
         set((state) => {
@@ -240,8 +273,8 @@ export const useCheckoutStore = create<CheckoutState>()(
                 marketId: market.id,
                 city: market.city,
                 state: market.state,
-                // Featured is opted into on the Enhancements screen (Step 4),
-                // not pre-selected here.
+                // Featured is opted into on the Enhancements step (Step 4),
+                // not pre-selected here — it hasn't been offered yet.
                 featured: false,
               },
             ],
@@ -288,6 +321,7 @@ export const useCheckoutStore = create<CheckoutState>()(
         }),
 
       setDebugSubmissionPayload: (payload) => set({ debugSubmissionPayload: payload }),
+      setDealId: (id) => set({ dealId: id }),
 
       reset: () =>
         set({
@@ -303,6 +337,9 @@ export const useCheckoutStore = create<CheckoutState>()(
           listingInfo: defaultListingInfo(),
           uploadedFiles: {},
           debugSubmissionPayload: null,
+          dealId: null,
+          trafficSource: "",
+          landingPage: "",
         }),
     }),
     {
@@ -336,6 +373,9 @@ export const useCheckoutStore = create<CheckoutState>()(
         selectedUpsellIds: state.selectedUpsellIds,
         listingChoice: state.listingChoice,
         listingInfo: state.listingInfo,
+        dealId: state.dealId,
+        trafficSource: state.trafficSource,
+        landingPage: state.landingPage,
       }),
     },
   ),

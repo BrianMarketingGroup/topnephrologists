@@ -12,8 +12,7 @@ import CharacterCounterTextarea from "@/components/checkout/CharacterCounterText
 import BusinessHoursEditor from "@/components/checkout/BusinessHoursEditor";
 import FileUploadDropzone from "@/components/checkout/FileUploadDropzone";
 import { useCheckoutStore, type UploadKind } from "@/lib/store/checkoutStore";
-import { buildListingInfoNowSchema, listingInfoLaterSchema } from "@/lib/checkoutSchema";
-import { buildSubmissionPayload } from "@/lib/submission";
+import { buildListingInfoNowSchema } from "@/lib/checkoutSchema";
 import { ALL_STATES } from "@/lib/checkoutMarkets";
 import type { SiteConfig } from "@/lib/config";
 
@@ -23,11 +22,21 @@ const UPLOAD_LABELS: Record<UploadKind, string> = {
   bannerImage: "Banner Image",
 };
 
+// The /api/v1/update_deals/{id} endpoint accepts exactly three fixed multipart
+// field names — anything else is silently dropped by FastAPI. Map the wizard's
+// upload kinds onto those fixed names.
+const UPLOAD_KIND_TO_ASSET_NAME: Record<UploadKind, "profile" | "banner" | "logo"> = {
+  profilePhoto: "profile",
+  bannerImage: "banner",
+  logo: "logo",
+};
+
 export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
   const store = useCheckoutStore();
   const [listingChoice, setLocalListingChoice] = useState<"now" | "later">(
     store.listingChoice ?? "now",
   );
+  const [linkEmail, setLinkEmail] = useState(store.contact.email);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -35,57 +44,81 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
   const info = store.listingInfo;
   const firstMarket = store.selectedMarkets[0] ?? null;
 
-  async function submitToApi(choice: "now" | "later") {
-    const payload = buildSubmissionPayload({
-      config,
-      selectedMarkets: store.selectedMarkets,
-      specialtyIds: store.specialtyIds,
-      contact: store.contact,
-      plaqueShipping: store.plaqueShipping,
-      payment: store.payment,
-      selectedUpsellIds: store.selectedUpsellIds,
-      listingChoice: choice,
-      listingInfo: choice === "now" ? info : null,
-    });
+  // The deal already exists by the time this step renders (created on leaving
+  // Step 4). This is always an *update* against that same deal — POST to
+  // /api/v1/update_deals/{id}, multipart, `metadata` JSON string + optional
+  // file fields (profile/banner/logo). Never a second create.
+  async function postUpdate(metadata: Record<string, unknown>): Promise<boolean> {
+    if (!store.dealId) return false;
+    const formData = new FormData();
+    formData.append("metadata", JSON.stringify(metadata));
 
-    setIsSubmitting(true);
-    setSubmitError(null);
-    try {
-      const res = await fetch("/api/apply", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-traffic-source": document.referrer || "direct",
-          "x-landing-page": window.location.pathname,
-        },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        setSubmitError(
-          body?.error ?? "Something went wrong submitting your application. Please try again.",
-        );
-        return;
-      }
-      store.setListingChoice(choice);
-      store.setDebugSubmissionPayload(payload);
-      store.goNext();
-    } catch {
-      setSubmitError("Could not reach the server. Please check your connection and try again.");
-    } finally {
-      setIsSubmitting(false);
+    for (const kind of config.listingFields.fileUploadTypes) {
+      const meta = store.uploadedFiles[kind];
+      if (!meta) continue;
+      const blob = await fetch(meta.previewUrl).then((r) => r.blob());
+      formData.append(UPLOAD_KIND_TO_ASSET_NAME[kind], blob, meta.name);
     }
+
+    const res = await fetch(`/api/update_deals/${store.dealId}`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) return false;
+
+    // Response includes signed GCS URLs — swap them in for the local blob
+    // previews once they arrive so the Step 6 confirmation shows real assets.
+    try {
+      const data: { assets?: Record<string, string | null> } = await res.json();
+      if (data.assets) {
+        for (const kind of config.listingFields.fileUploadTypes) {
+          const assetName = UPLOAD_KIND_TO_ASSET_NAME[kind];
+          const signedUrl = data.assets[assetName];
+          const existing = store.uploadedFiles[kind];
+          if (signedUrl && existing) {
+            store.setUploadedFile(kind, { ...existing, previewUrl: signedUrl });
+          }
+        }
+      }
+    } catch {
+      // response wasn't JSON — the update itself still succeeded
+    }
+    return true;
   }
 
   async function handleSubmit() {
+    setSubmitError(null);
+
     if (listingChoice === "later") {
-      const emailCheck = z.string().email("Enter a valid email address").safeParse(store.contact.email);
+      const emailCheck = z.string().email("Enter a valid email address").safeParse(linkEmail);
       if (!emailCheck.success) {
         setErrors({ linkEmail: emailCheck.error.issues[0]?.message ?? "Enter a valid email address" });
         return;
       }
       setErrors({});
-      await submitToApi("later");
+      setIsSubmitting(true);
+      try {
+        const ok = await postUpdate({
+          shop_name: store.contact.company,
+          link_email: linkEmail,
+        }).catch(() => false);
+        if (!ok) {
+          setSubmitError("Something went wrong. Please try again.");
+          return;
+        }
+        // Fire the "complete later" welcome/checklist email — best-effort;
+        // a mail hiccup must not block finishing the wizard since the deal
+        // is already saved.
+        await fetch(`/api/complete_later_email/${store.dealId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: linkEmail }),
+        }).catch(() => {});
+        store.setListingChoice("later");
+        store.goNext();
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -99,7 +132,32 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
       return;
     }
     setErrors({});
-    await submitToApi("now");
+
+    setIsSubmitting(true);
+    try {
+      const metadata: Record<string, unknown> = {
+        shop_name: info.businessName,
+        key_staff: info.people,
+        shop_phone: info.listingPhone,
+        listing_email: info.listingEmail,
+        website: info.website,
+        asset_permission: info.assetPermission,
+        bio: info.bio,
+        hours: info.hours,
+        ...(!info.sameAsBilling && info.businessAddress
+          ? { business_address: info.businessAddress }
+          : {}),
+      };
+      const ok = await postUpdate(metadata).catch(() => false);
+      if (!ok) {
+        setSubmitError("Something went wrong. Please try again.");
+        return;
+      }
+      store.setListingChoice("now");
+      store.goNext();
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -108,6 +166,7 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
         <ListingPreviewMockup
           businessName={info.businessName}
           bio={info.bio}
+          people={info.people}
           market={firstMarket}
           logo={store.uploadedFiles.logo}
           hasFeatured={store.selectedMarkets.some((m) => m.featured)}
@@ -129,7 +188,7 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
               <FileEdit size={18} className="text-primary shrink-0" />
               <div>
                 <p className="font-semibold text-dark text-sm">Complete Listing Now</p>
-                <p className="text-xs text-muted">Fill out your practice details right away.</p>
+                <p className="text-xs text-muted">Fill out your listing details right away.</p>
               </div>
             </button>
             <button
@@ -163,8 +222,8 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
             >
               <Input
                 type="email"
-                value={store.contact.email}
-                onChange={(e) => store.setContact({ email: e.target.value })}
+                value={linkEmail}
+                onChange={(e) => setLinkEmail(e.target.value)}
                 error={errors.linkEmail}
               />
             </FormField>
@@ -175,7 +234,7 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
           <div className="space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField
-                label="Practice / Business Name"
+                label="Firm Name"
                 required
                 className="sm:col-span-2"
                 error={errors.businessName}
@@ -184,7 +243,19 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
                   value={info.businessName}
                   onChange={(e) => store.setListingInfo({ businessName: e.target.value })}
                   error={errors.businessName}
-                  placeholder="Apex Nephrology Associates"
+                />
+              </FormField>
+              <FormField
+                label={config.listingFields.peopleLabel}
+                required
+                className="sm:col-span-2"
+                hint="Separate multiple names with commas"
+                error={errors.people}
+              >
+                <Input
+                  value={info.people}
+                  onChange={(e) => store.setListingInfo({ people: e.target.value })}
+                  error={errors.people}
                 />
               </FormField>
               <FormField label="Listing Phone Number" required error={errors.listingPhone}>
@@ -192,7 +263,6 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
                   value={info.listingPhone}
                   onChange={(e) => store.setListingInfo({ listingPhone: e.target.value })}
                   error={errors.listingPhone}
-                  placeholder="(555) 000-0000"
                 />
               </FormField>
               <FormField label="Listing Email Address" required error={errors.listingEmail}>
@@ -202,12 +272,11 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
                   error={errors.listingEmail}
                 />
               </FormField>
-              <FormField label="Website" className="sm:col-span-2" hint="optional" error={errors.website}>
+              <FormField label="Website" className="sm:col-span-2" error={errors.website}>
                 <Input
                   value={info.website}
                   onChange={(e) => store.setListingInfo({ website: e.target.value })}
                   error={errors.website}
-                  placeholder="https://yourpractice.com"
                 />
               </FormField>
             </div>
@@ -296,12 +365,12 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
             </div>
 
             <CharacterCounterTextarea
-              label="About Your Practice"
+              label="About / Bio"
               value={info.bio}
               onChange={(v) => store.setListingInfo({ bio: v })}
               maxChars={config.listingFields.bioMaxChars}
               error={errors.bio}
-              placeholder="Describe your nephrology practice, your approach to kidney care, and what makes your practice stand out for patients and referring physicians…"
+              placeholder="Tell prospective clients about your firm…"
             />
 
             <BusinessHoursEditor
@@ -375,11 +444,6 @@ export default function Step5ListingInfo({ config }: { config: SiteConfig }) {
                   </div>
                 </label>
               </div>
-              {errors.assetPermission && (
-                <p className="text-xs text-danger mt-1.5" role="alert">
-                  {errors.assetPermission}
-                </p>
-              )}
             </div>
           </div>
         )}
