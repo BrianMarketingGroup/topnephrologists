@@ -38,6 +38,8 @@ export default function Step3Payment({ config }: { config: SiteConfig }) {
 
   function onSubmit(values: PaymentData) {
     setPayment(values);
+    // No real processor call yet — advancing the step is the entire
+    // "charge" simulation, matching the current site's existing apply flow.
     goNext();
   }
 
@@ -49,18 +51,6 @@ export default function Step3Payment({ config }: { config: SiteConfig }) {
             <h2 className="text-lg font-semibold text-primary mb-1 flex items-center gap-2">
               <Lock size={16} className="text-muted" /> Complete Your Purchase
             </h2>
-            <p className="text-sm text-muted">
-              Secure checkout — your listing fee is billed annually. All listings debut per
-              this site&apos;s current production schedule.
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3">
-            <p className="text-sm text-dark">
-              <strong className="text-primary">Please stay on this page</strong> and complete the
-              checkout — closing this window after paying but before finishing may leave your
-              listing incomplete.
-            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -70,7 +60,7 @@ export default function Step3Payment({ config }: { config: SiteConfig }) {
               className="sm:col-span-2"
               error={errors.cardholderName?.message}
             >
-              <Input {...register("cardholderName")} error={errors.cardholderName?.message} placeholder="Jane Smith" />
+              <Input {...register("cardholderName")} error={errors.cardholderName?.message} />
             </FormField>
 
             <Controller
@@ -111,15 +101,22 @@ export default function Step3Payment({ config }: { config: SiteConfig }) {
             />
 
             <FormField label="CVV" required error={errors.cvv?.message}>
-              <Input inputMode="numeric" maxLength={4} {...register("cvv")} error={errors.cvv?.message} placeholder="CVV" />
+              <Input inputMode="numeric" maxLength={4} {...register("cvv")} error={errors.cvv?.message} />
             </FormField>
 
-            <FormField label="Billing Address" required className="sm:col-span-2" error={errors.billingAddress?.message}>
+            <FormField
+              label="Billing Address"
+              required
+              className="sm:col-span-2"
+              error={errors.billingAddress?.message}
+            >
               <Input {...register("billingAddress")} error={errors.billingAddress?.message} />
             </FormField>
+
             <FormField label="Billing City" required error={errors.billingCity?.message}>
               <Input {...register("billingCity")} error={errors.billingCity?.message} />
             </FormField>
+
             <FormField label="Billing State" required error={errors.billingState?.message}>
               <Select {...register("billingState")} error={errors.billingState?.message}>
                 <option value="">Select…</option>
@@ -130,8 +127,9 @@ export default function Step3Payment({ config }: { config: SiteConfig }) {
                 ))}
               </Select>
             </FormField>
+
             <FormField label="Billing ZIP Code" required error={errors.billingZip?.message}>
-              <Input {...register("billingZip")} error={errors.billingZip?.message} placeholder="75201" />
+              <Input {...register("billingZip")} error={errors.billingZip?.message} />
             </FormField>
           </div>
 
